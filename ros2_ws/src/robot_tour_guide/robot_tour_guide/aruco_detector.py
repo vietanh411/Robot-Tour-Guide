@@ -59,12 +59,15 @@ class ArucoDetector(Node):
             dict_name = '4x4_50'
 
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICTS[dict_name])
-        self.aruco_params = cv2.aruco.DetectorParameters()
-        # OpenCV >= 4.7 exposes the new ArucoDetector class; fall back if absent.
-        if hasattr(cv2.aruco, 'ArucoDetector'):
-            self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
+        # Build DetectorParameters in a way that works on both OpenCV 4.6 and 4.7+.
+        if hasattr(cv2.aruco, 'DetectorParameters_create'):
+            self.aruco_params = cv2.aruco.DetectorParameters_create()
         else:
-            self.detector = None
+            self.aruco_params = cv2.aruco.DetectorParameters()
+        # The new cv2.aruco.ArucoDetector class is known to SIGSEGV on first call
+        # in some OpenCV 4.7 builds; the free-function form is more stable across
+        # versions, so we always use it.
+        self.detector = None
 
         self.bridge = CvBridge()
         self.camera_matrix = None
@@ -115,11 +118,16 @@ class ArucoDetector(Node):
             self.get_logger().warn(f'cv_bridge failure: {exc}')
             return
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        if self.detector is not None:
-            corners, ids, _ = self.detector.detectMarkers(gray)
-        else:
-            corners, ids, _ = cv2.aruco.detectMarkers(gray, self.aruco_dict, parameters=self.aruco_params)
+        # Force contiguous memory: non-contiguous arrays from cv_bridge are a
+        # documented source of SIGSEGVs inside OpenCV native code.
+        frame = np.ascontiguousarray(frame)
+        gray = np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        try:
+            corners, ids, _ = cv2.aruco.detectMarkers(
+                gray, self.aruco_dict, parameters=self.aruco_params)
+        except cv2.error as exc:
+            self.get_logger().warn(f'detectMarkers raised cv2.error: {exc}')
+            return
 
         if ids is None or len(ids) == 0:
             return
@@ -138,28 +146,42 @@ class ArucoDetector(Node):
             })))
 
         if self.annotated_pub is not None:
-            cv2.aruco.drawDetectedMarkers(frame, corners, ids)
-            self.annotated_pub.publish(self.bridge.cv2_to_imgmsg(frame, encoding='bgr8'))
+            try:
+                cv2.aruco.drawDetectedMarkers(frame, corners, ids)
+                self.annotated_pub.publish(self.bridge.cv2_to_imgmsg(frame, encoding='bgr8'))
+            except cv2.error as exc:
+                self.get_logger().warn(f'drawDetectedMarkers failed: {exc}')
 
     def _estimate_poses(self, corners, ids):
         """Estimate per-marker pose using solvePnP on the marker's corner template."""
         half = self.marker_size / 2.0
         # Marker corner order matches cv2.aruco: TL, TR, BR, BL in marker frame.
-        object_points = np.array([
+        object_points = np.ascontiguousarray(np.array([
             [-half,  half, 0.0],
             [ half,  half, 0.0],
             [ half, -half, 0.0],
             [-half, -half, 0.0],
-        ], dtype=np.float64)
+        ], dtype=np.float64))
+
+        # Empty / mis-sized distortion arrays segfault solvePnP on some builds.
+        if self.dist_coeffs is None or self.dist_coeffs.size == 0:
+            dist = np.zeros(5, dtype=np.float64)
+        else:
+            dist = np.ascontiguousarray(self.dist_coeffs.astype(np.float64))
 
         results = []
         for marker_corners, marker_id in zip(corners, ids.flatten()):
-            image_points = marker_corners.reshape(-1, 2).astype(np.float64)
-            ok, rvec, tvec = cv2.solvePnP(
-                object_points, image_points,
-                self.camera_matrix, self.dist_coeffs,
-                flags=cv2.SOLVEPNP_IPPE_SQUARE,
-            )
+            image_points = np.ascontiguousarray(
+                marker_corners.reshape(-1, 2).astype(np.float64))
+            try:
+                ok, rvec, tvec = cv2.solvePnP(
+                    object_points, image_points,
+                    self.camera_matrix, dist,
+                    flags=cv2.SOLVEPNP_ITERATIVE,
+                )
+            except cv2.error as exc:
+                self.get_logger().warn(f'solvePnP failed: {exc}')
+                continue
             if not ok:
                 continue
             x, y, z = float(tvec[0]), float(tvec[1]), float(tvec[2])
