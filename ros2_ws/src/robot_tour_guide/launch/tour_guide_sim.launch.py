@@ -4,7 +4,7 @@ TurtleBot 4 + Nav2 stack the user is expected to start separately.
 Run (in three terminals):
 
   # 1. Sim + bringup (Gazebo Harmonic with TurtleBot 4)
-  ros2 launch turtlebot4_ignition_bringup turtlebot4_ignition.launch.py
+  ros2 launch turtlebot4_gz_bringup turtlebot4_gz.launch.py
 
   # 2. Nav2 + slam_toolbox (or supply a map)
   ros2 launch turtlebot4_navigation nav2.launch.py
