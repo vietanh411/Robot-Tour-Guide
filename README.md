@@ -128,7 +128,7 @@ Generate a 4×4 ArUco marker for each landmark id in `landmarks.yaml`:
 2. Set **Dictionary = 4x4 (50, 100, 250, 1000)**.
 3. Enter the marker ID and a side length matching `aruco_detector.marker_size_m`
    (default **0.10 m**, i.e. 10 cm). Use a ruler to confirm the printed size.
-4. Print, cut, and tape one marker at chest height near each tour stop.
+4. Print, cut, and tape one marker at roughly camera height (~25–35 cm) on a flat vertical surface each tour stop.
 
 > A wrong `marker_size_m` will not break detection but will give you wrong
 > distances, which the arrival logic depends on.
