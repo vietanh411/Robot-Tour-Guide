@@ -1,0 +1,72 @@
+# Centralised parameters for the tour-guide stack.
+# Override per-deployment by passing your own YAML to the launch file:
+#   ros2 launch robot_tour_guide tour_guide.launch.py params_file:=/path/to/your.yaml
+
+aruco_detector:
+  ros__parameters:
+    image_topic: "/oakd/rgb/preview/image_raw"
+    camera_info_topic: "/oakd/rgb/preview/camera_info"
+    marker_size_m: 0.10            # printed marker side length (metres)
+    dictionary: "4x4_1000"         # must match the dictionary used to print the markers
+    publish_annotated: true
+    min_detection_distance_m: 0.20
+    max_detection_distance_m: 3.50
+
+semantic_perception:
+  ros__parameters:
+    image_topic: "/oakd/rgb/preview/image_raw"
+    scan_topic: "/scan"
+    yolo_weights: "yolov8n.pt"     # downloaded automatically on first run
+    yolo_conf: 0.45
+    yolo_period_s: 0.20
+    cluster_gap_m: 0.20
+    min_cluster_points: 4
+    max_cluster_range_m: 4.0
+    person_width_range_m: [0.25, 0.80]
+    door_gap_min_m: 0.70
+    door_gap_max_m: 1.20
+    publish_period_s: 0.20
+
+world_model:
+  ros__parameters:
+    publish_period_s: 0.25
+    drop_below_weight: 0.05
+    frame_id: "base_link"
+
+tour_planner:
+  ros__parameters:
+    pois_file: ""                  # blank = use packaged config/pois.yaml
+    start_x: 0.0
+    start_y: 0.0
+    autoplan_on_start: true
+
+executive:
+  ros__parameters:
+    landmarks_file: ""             # blank = use packaged config/landmarks.yaml
+    arrival_radius_m: 0.50
+    landmark_arrival_distance_m: 1.50
+    landmark_dwell_s: 1.0
+    narration_dwell_s: 6.0
+    person_blocking_distance_m: 1.5
+    person_block_wait_s: 10.0
+    max_retries_per_poi: 2
+    frame_id: "map"
+
+narrator:
+  ros__parameters:
+    enable_tts: true
+    rate_wpm: 165
+
+landmark_announcer:
+  ros__parameters:
+    landmarks_file: ""             # blank = use packaged config/landmarks.yaml
+    max_distance_m: 1.50
+    dwell_s: 0.7
+    cooldown_s: 12.0
+
+safety_monitor:
+  ros__parameters:
+    stop_distance_m: 0.25
+    forward_arc_deg: 60.0
+    hold_s: 0.5
+    publish_rate_hz: 20.0

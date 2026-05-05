@@ -1,0 +1,36 @@
+# Landmark database. Each ArUco marker ID maps to a tour-stop description.
+# Print the matching marker (e.g. from https://chev.me/arucogen/  with
+# Dictionary = 4x4 (50, 100, 250, 1000) and a side length matching
+# `marker_size_m` in params.yaml) and tape it to the corresponding exhibit.
+
+landmarks:
+  1:
+    name: "Gallogly Hall"
+    description: >
+      Gallogly Hall is a modern hub for engineering education at the
+      University of Oklahoma, featuring collaborative classrooms, labs,
+      and student-focused spaces. It reflects OU's commitment to
+      hands-on learning and innovation.
+
+  2:
+    name: "Sarkeys Energy Center"
+    description: >
+      Sarkeys Energy Center supports research and teaching connected to
+      energy, geology, and natural resources. It is an important academic
+      space for students exploring Oklahoma's long-standing role in the
+      energy industry.
+
+  3:
+    name: "Devon Energy Hall"
+    description: >
+      Devon Energy Hall is home to advanced engineering classrooms, labs,
+      and project spaces. The building highlights OU's focus on preparing
+      students for careers in technology, design, and problem-solving.
+
+  4:
+    name: "Rawl Engineering Practice Facility"
+    description: >
+      The Rawl Engineering Practice Facility gives students space to build,
+      test, and refine real engineering projects. It supports practical
+      teamwork and helps connect classroom learning with real-world
+      engineering experience.
