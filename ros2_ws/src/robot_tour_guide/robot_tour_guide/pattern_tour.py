@@ -1,14 +1,19 @@
-"""Pattern-based open-loop tour executor with reactive obstacle avoidance.
+"""Pattern-based tour executor with target-position navigation + reactive
+obstacle avoidance.
 
-Drives a predefined sequence of ``forward / backward / rotate / announce /
-wait`` steps loaded from a YAML file. Progress is tracked from odometry, so
-no map or AMCL is required.
+For each ``forward`` / ``backward`` step the node:
+  1. Locks in a *target pose* (start_pose + distance * heading) when the
+     step begins.
+  2. Continually steers toward that target while monitoring the LiDAR.
+     If something gets in the way, deflects toward the side with more
+     clearance and slows proportionally to proximity.
+  3. Considers the step "arrived" only when the robot is within
+     ``target_tolerance_m`` of the target *position*.
+  4. Realigns to the original heading before declaring the step done so
+     subsequent ``rotate`` steps remain correct.
 
-During ``forward``/``backward`` steps the node monitors the LiDAR forward
-arc. If an obstacle appears within ``safety_distance_m`` it deflects toward
-the side with more clearance and slows down — then realigns with the
-original step heading once the path is clear. Per-step ``timeout`` keeps the
-robot from getting stuck against a wall forever.
+This means a robot that has to detour around a chair will still end up at
+the planned destination facing the planned direction — no skipped steps.
 
 Step types in pattern.yaml::
 
@@ -17,6 +22,10 @@ Step types in pattern.yaml::
     rotate     angle: <rad>             # +ve = CCW / left
     announce   landmark_id: <int>  dwell: <s>  timeout: <s>
     wait       duration: <s>
+
+Backward steps disable LiDAR avoidance (the LiDAR can't see behind),
+but target-seeking still applies — the robot reverses toward the target
+position. Make sure the path behind is clear.
 """
 
 import json
@@ -59,21 +68,21 @@ class PatternTour(Node):
         self.declare_parameter('linear_speed', 0.15)
         self.declare_parameter('angular_speed', 0.4)
         self.declare_parameter('distance_tolerance_m', 0.05)
-        self.declare_parameter('angle_tolerance_rad', 0.05)
+        self.declare_parameter('target_tolerance_m', 0.15)
+        self.declare_parameter('angle_tolerance_rad', 0.10)
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
         self.declare_parameter('odom_topic', '/odom')
         self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('landmark_topic', '/landmarks/detected')
         self.declare_parameter('start_delay_s', 3.0)
 
-        # Reactive avoidance knobs.
         self.declare_parameter('avoid_obstacles', True)
         self.declare_parameter('safety_distance_m', 0.50)
         self.declare_parameter('hard_stop_distance_m', 0.20)
         self.declare_parameter('forward_arc_deg', 60.0)
         self.declare_parameter('side_arc_deg', 60.0)
         self.declare_parameter('avoidance_angular_speed', 0.5)
-        self.declare_parameter('default_step_timeout_s', 25.0)
+        self.declare_parameter('default_step_timeout_s', 30.0)
 
         path = self.get_parameter('pattern_file').value
         if not path:
@@ -88,6 +97,7 @@ class PatternTour(Node):
         self.linear_speed = float(self.get_parameter('linear_speed').value)
         self.angular_speed = float(self.get_parameter('angular_speed').value)
         self.dist_tol = float(self.get_parameter('distance_tolerance_m').value)
+        self.target_tol = float(self.get_parameter('target_tolerance_m').value)
         self.angle_tol = float(self.get_parameter('angle_tolerance_rad').value)
         self.start_delay = float(self.get_parameter('start_delay_s').value)
         self.avoid = bool(self.get_parameter('avoid_obstacles').value)
@@ -101,6 +111,8 @@ class PatternTour(Node):
         self.current_step_idx = 0
         self.step_started = False
         self.step_start_pose: Optional[Tuple[float, float, float]] = None
+        self.step_target: Optional[Tuple[float, float]] = None
+        self.step_phase = 'travel'        # 'travel' or 'realign'
         self.step_start_time = 0.0
         self.recent_landmarks: dict = {}
         self.current_pose: Optional[Tuple[float, float, float]] = None
@@ -166,7 +178,9 @@ class PatternTour(Node):
             self.step_start_pose = self.current_pose
             self.step_start_time = time.time()
             self.step_started = True
+            self.step_phase = 'travel'
             self.was_avoiding = False
+            self._init_step_target(step)
             self.get_logger().info(
                 f'Step {self.current_step_idx + 1}/{len(self.steps)}: {step}'
             )
@@ -174,15 +188,30 @@ class PatternTour(Node):
         if self._execute_step(step):
             self.current_step_idx += 1
             self.step_started = False
+            self.step_target = None
             self._publish_zero()
             if self.current_step_idx >= len(self.steps):
                 self.get_logger().info('Pattern tour complete.')
                 self.narration_pub.publish(
                     String(data='Tour complete. Thank you for visiting!'))
 
+    def _init_step_target(self, step: dict) -> None:
+        kind = step.get('type', '').lower()
+        if kind not in ('forward', 'backward'):
+            self.step_target = None
+            return
+        sx, sy, syaw = self.step_start_pose
+        distance = float(step.get('distance', 0.0))
+        sign = 1.0 if kind == 'forward' else -1.0
+        tx = sx + sign * distance * math.cos(syaw)
+        ty = sy + sign * distance * math.sin(syaw)
+        self.step_target = (tx, ty)
+        self.get_logger().info(
+            f'  target pose: ({tx:+.3f}, {ty:+.3f}) heading {math.degrees(syaw):+.1f}°'
+        )
+
     def _execute_step(self, step: dict) -> bool:
         kind = step.get('type', 'wait').lower()
-
         if kind in ('forward', 'backward'):
             return self._step_translate(step, kind)
         if kind == 'rotate':
@@ -191,96 +220,70 @@ class PatternTour(Node):
             return self._step_announce(step)
         if kind == 'wait':
             return self._step_wait(step)
-
         self.get_logger().warn(f'Unknown step type: {kind!r}; skipping.')
         return True
 
-    # ----- per-step handlers ------------------------------------------------
+    # ----- translate (with obstacle avoidance) ------------------------------
     def _step_translate(self, step: dict, kind: str) -> bool:
-        distance = float(step.get('distance', 0.0))
         timeout = float(step.get('timeout', self.default_step_timeout))
-        sign = 1.0 if kind == 'forward' else -1.0
-        sx, sy, syaw = self.step_start_pose
-        cx, cy, cyaw = self.current_pose
-
-        # Project displacement onto the original heading.  This way side-step
-        # motions during avoidance don't count as forward progress, but smooth
-        # detours still register honest progress.
-        dx, dy = cx - sx, cy - sy
-        progress = sign * (dx * math.cos(syaw) + dy * math.sin(syaw))
-
-        if progress >= distance - self.dist_tol:
-            return True
-
         if time.time() - self.step_start_time > timeout:
             self.get_logger().warn(
-                f'Translate step timed out at {progress:.2f}/{distance:.2f} m; '
-                f'continuing to next step.'
-            )
+                f'Translate step timed out; advancing to next step.')
             return True
 
-        angular_cmd, linear_factor = self._steering_for_translate(syaw, cyaw, sign)
+        sign = 1.0 if kind == 'forward' else -1.0
+        cx, cy, cyaw = self.current_pose
+        tx, ty = self.step_target
+        sx, sy, syaw = self.step_start_pose
+
+        if self.step_phase == 'travel':
+            dist_to_target = math.hypot(tx - cx, ty - cy)
+            if dist_to_target < self.target_tol:
+                self.step_phase = 'realign'
+                self.get_logger().info(
+                    f'  reached target ({dist_to_target:.3f} m); realigning heading.')
+                self._publish_zero()
+                return False
+            omega, linear_factor = self._steering_to_target(tx, ty, sign)
+            self._publish_velocity(
+                linear=sign * self.linear_speed * linear_factor,
+                angular=omega,
+            )
+            return False
+
+        # Phase: realign with original step heading.
+        heading_err = normalize_angle(syaw - cyaw)
+        if abs(heading_err) <= self.angle_tol:
+            return True
+        rot_sign = 1.0 if heading_err >= 0.0 else -1.0
         self._publish_velocity(
-            linear=sign * self.linear_speed * linear_factor,
-            angular=angular_cmd,
+            linear=0.0,
+            angular=rot_sign * min(self.angular_speed, max(0.15, abs(heading_err))),
         )
         return False
 
-    def _step_rotate(self, step: dict) -> bool:
-        target = float(step.get('angle', 0.0))
-        _, _, sy = self.step_start_pose
-        _, _, cy = self.current_pose
-        rotated = normalize_angle(cy - sy)
-        sign = 1.0 if target >= 0.0 else -1.0
-        if abs(rotated) >= abs(target) - self.angle_tol:
-            return True
-        self._publish_velocity(linear=0.0, angular=sign * self.angular_speed)
-        return False
+    def _steering_to_target(self, tx: float, ty: float,
+                            sign: float) -> Tuple[float, float]:
+        """Attractive steering toward (tx, ty) with reactive obstacle deflection.
 
-    def _step_announce(self, step: dict) -> bool:
-        self._publish_zero()
-        landmark_id = int(step.get('landmark_id', -1))
-        dwell = float(step.get('dwell', 5.0))
-        timeout = float(step.get('timeout', dwell + 5.0))
-        elapsed = time.time() - self.step_start_time
-
-        seen = (landmark_id in self.recent_landmarks
-                and (time.time() - self.recent_landmarks[landmark_id]) < 2.0)
-        if seen and elapsed >= dwell:
-            return True
-        if elapsed >= timeout:
-            self.get_logger().warn(
-                f'Marker {landmark_id} not confirmed within {timeout:.1f}s; '
-                f'continuing anyway.'
-            )
-            return True
-        return False
-
-    def _step_wait(self, step: dict) -> bool:
-        self._publish_zero()
-        return time.time() - self.step_start_time >= float(step.get('duration', 1.0))
-
-    # ----- reactive obstacle avoidance --------------------------------------
-    def _steering_for_translate(self, target_yaw: float, current_yaw: float,
-                                sign: float) -> Tuple[float, float]:
-        """Return (angular_velocity, linear_speed_factor in [0, 1]).
-
-        Default behaviour: gently realign with ``target_yaw`` and full speed.
-        With LiDAR data and avoidance enabled: deflect to the clearer side
-        when an obstacle is in the forward arc, and slow proportionally to
-        proximity. When backing up (sign < 0), avoidance is disabled because
-        the LiDAR cannot see behind the robot.
+        Returns (angular_velocity, linear_factor in [0, 1]).
         """
-        heading_err = normalize_angle(target_yaw - current_yaw)
-        align_omega = max(-self.avoid_omega, min(self.avoid_omega, 0.8 * heading_err))
+        cx, cy, cyaw = self.current_pose
+        dx, dy = tx - cx, ty - cy
+        desired_yaw = math.atan2(dy, dx)
+        if sign < 0:
+            desired_yaw = normalize_angle(desired_yaw + math.pi)
+        heading_err = normalize_angle(desired_yaw - cyaw)
+        attractive = max(-self.angular_speed,
+                         min(self.angular_speed, 1.5 * heading_err))
 
         if not self.avoid or self.latest_scan is None or sign < 0:
-            return align_omega, 1.0
+            return attractive, 1.0
 
         scan = self.latest_scan
         n = len(scan.ranges)
         if n == 0:
-            return align_omega, 1.0
+            return attractive, 1.0
 
         forward_idx = int(round((-scan.angle_min) / scan.angle_increment))
         f_half = int(round((self.forward_arc / 2.0) / scan.angle_increment))
@@ -292,18 +295,17 @@ class PatternTour(Node):
         if not math.isfinite(forward_min) or forward_min > self.safety_d:
             if self.was_avoiding:
                 self.get_logger().info(
-                    f'Forward clear ({forward_min:.2f} m); resuming heading.')
+                    f'Forward clear ({forward_min:.2f} m); resuming target heading.')
                 self.was_avoiding = False
-            return align_omega, 1.0
+            return attractive, 1.0
 
-        # Obstacle ahead — pick the side with more clearance.
+        # Obstacle ahead: deflect to clearer side and slow down.
         right_avg = self._sector_avg(scan, max(0, forward_idx - f_half - s_half),
                                            max(0, forward_idx - f_half))
         left_avg = self._sector_avg(scan, min(n, forward_idx + f_half),
                                           min(n, forward_idx + f_half + s_half))
         omega = self.avoid_omega if left_avg >= right_avg else -self.avoid_omega
 
-        # Linear scales: zero at hard_stop_d, full at safety_d.
         span = max(0.01, self.safety_d - self.hard_stop_d)
         linear_factor = max(0.0, min(1.0, (forward_min - self.hard_stop_d) / span))
 
@@ -327,7 +329,40 @@ class PatternTour(Node):
                 if math.isfinite(r) and r > scan.range_min]
         return (sum(vals) / len(vals)) if vals else 0.0
 
-    # ----- velocity publishing ---------------------------------------------
+    # ----- rotate / announce / wait ----------------------------------------
+    def _step_rotate(self, step: dict) -> bool:
+        target = float(step.get('angle', 0.0))
+        _, _, sy = self.step_start_pose
+        _, _, cy = self.current_pose
+        rotated = normalize_angle(cy - sy)
+        sign = 1.0 if target >= 0.0 else -1.0
+        if abs(rotated) >= abs(target) - self.angle_tol:
+            return True
+        self._publish_velocity(linear=0.0, angular=sign * self.angular_speed)
+        return False
+
+    def _step_announce(self, step: dict) -> bool:
+        self._publish_zero()
+        landmark_id = int(step.get('landmark_id', -1))
+        dwell = float(step.get('dwell', 5.0))
+        timeout = float(step.get('timeout', dwell + 5.0))
+        elapsed = time.time() - self.step_start_time
+        seen = (landmark_id in self.recent_landmarks
+                and (time.time() - self.recent_landmarks[landmark_id]) < 2.0)
+        if seen and elapsed >= dwell:
+            return True
+        if elapsed >= timeout:
+            self.get_logger().warn(
+                f'Marker {landmark_id} not confirmed within {timeout:.1f}s; '
+                f'continuing anyway.')
+            return True
+        return False
+
+    def _step_wait(self, step: dict) -> bool:
+        self._publish_zero()
+        return time.time() - self.step_start_time >= float(step.get('duration', 1.0))
+
+    # ----- velocity --------------------------------------------------------
     def _publish_velocity(self, linear: float, angular: float) -> None:
         msg = TwistStamped()
         msg.header.stamp = self.get_clock().now().to_msg()

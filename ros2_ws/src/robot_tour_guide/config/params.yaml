@@ -77,7 +77,8 @@ pattern_tour:
     linear_speed: 0.15             # m/s, keep low for safety
     angular_speed: 0.4             # rad/s
     distance_tolerance_m: 0.05
-    angle_tolerance_rad: 0.05
+    target_tolerance_m: 0.15       # how close to the target pose counts as arrived
+    angle_tolerance_rad: 0.10      # heading-realign tolerance after arriving
     cmd_vel_topic: "/cmd_vel"
     odom_topic: "/odom"
     scan_topic: "/scan"
