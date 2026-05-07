@@ -80,5 +80,15 @@ pattern_tour:
     angle_tolerance_rad: 0.05
     cmd_vel_topic: "/cmd_vel"
     odom_topic: "/odom"
+    scan_topic: "/scan"
     landmark_topic: "/landmarks/detected"
     start_delay_s: 3.0             # quiet pause before motion starts
+
+    # Reactive obstacle avoidance (used during forward steps).
+    avoid_obstacles: true          # set false to disable LiDAR avoidance
+    safety_distance_m: 0.50        # below this, deflect to clearer side
+    hard_stop_distance_m: 0.20     # below this, drop linear speed to 0
+    forward_arc_deg: 60.0          # how wide the "ahead" check is
+    side_arc_deg: 60.0             # how wide each side-clearance check is
+    avoidance_angular_speed: 0.5   # rad/s while deflecting
+    default_step_timeout_s: 25.0   # safety cap per forward/backward step
