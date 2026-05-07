@@ -1,13 +1,9 @@
 # Tour stops the robot will visit. Coordinates are in the `map` frame
-# produced by slam_toolbox / Nav2.
-#
-# IMPORTANT: the (x, y, yaw) values below are placeholders. Replace them
-# with real poses from your saved REPF B4 map before running the full
-# Nav2 tour. (RViz "Publish Point" is the easiest way to read coordinates.)
+# produced by slam_toolbox / Nav2 against maps/repf_b4_map.yaml.
 #
 #   id           - integer; passed to /tour/drop_poi to skip dynamically
 #   name         - displayed in logs and in the tour plan
-#   x, y, yaw    - target pose in metres / radians (yaw optional, default 0)
+#   x, y, yaw    - target pose in metres / radians
 #   landmark_id  - matching ArUco ID; sighting this marker within
 #                  `landmark_arrival_distance_m` counts as arrival.
 #   description  - fallback narration if no landmark is sighted at this stop.
@@ -15,8 +11,8 @@
 pois:
   - id: 1
     name: "Gallogly Hall"
-    x: 1.5
-    y: 0.0
+    x: -1.607
+    y: 1.460
     yaw: 0.0
     landmark_id: 1
     description: >
@@ -24,27 +20,27 @@ pois:
 
   - id: 2
     name: "Sarkeys Energy Center"
-    x: 3.0
-    y: 1.5
-    yaw: 1.57
+    x: -1.408
+    y: -0.317
+    yaw: 0.0
     landmark_id: 2
     description: >
       Sarkeys Energy Center, supporting research in energy and geology.
 
   - id: 3
     name: "Devon Energy Hall"
-    x: 3.5
-    y: -1.5
-    yaw: -1.57
+    x: -3.605
+    y: 1.388
+    yaw: 0.0
     landmark_id: 3
     description: >
       Devon Energy Hall, home to advanced engineering classrooms and labs.
 
   - id: 4
     name: "Rawl Engineering Practice Facility"
-    x: 0.0
-    y: -3.0
-    yaw: -1.57
+    x: -5.421
+    y: 0.906
+    yaw: 0.0
     landmark_id: 4
     description: >
       The Rawl Engineering Practice Facility, where students build and test
