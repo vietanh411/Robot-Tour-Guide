@@ -1,0 +1,35 @@
+# Predefined open-loop tour pattern for `pattern_tour`. Edit the steps
+# to match your real REPF B4 layout — distances are metres, angles are
+# radians (positive = CCW / left turn, negative = CW / right turn).
+#
+# Step types:
+#   forward    distance: <metres>
+#   backward   distance: <metres>
+#   rotate     angle:    <radians>
+#   announce   landmark_id: <int>  dwell: <s>  timeout: <s>
+#   wait       duration: <s>
+#
+# Tip: at the start, position the robot facing landmark 1. The robot will
+# announce + dwell, then turn / drive to the next stop.
+
+steps:
+  # ----- Stop 1: Gallogly Hall -------------------------------------------
+  - { type: announce, landmark_id: 1, dwell: 6.0, timeout: 12.0 }
+
+  # ----- Stop 2: Sarkeys Energy Center -----------------------------------
+  - { type: rotate,   angle: -1.5708 }              # turn right 90 deg
+  - { type: forward,  distance: 1.0 }
+  - { type: announce, landmark_id: 2, dwell: 6.0, timeout: 12.0 }
+
+  # ----- Stop 3: Devon Energy Hall ---------------------------------------
+  - { type: rotate,   angle: 3.1416 }               # about-face 180 deg
+  - { type: forward,  distance: 1.5 }
+  - { type: announce, landmark_id: 3, dwell: 6.0, timeout: 12.0 }
+
+  # ----- Stop 4: Rawl Engineering Practice Facility ----------------------
+  - { type: rotate,   angle: -1.5708 }              # turn right 90 deg
+  - { type: forward,  distance: 1.5 }
+  - { type: announce, landmark_id: 4, dwell: 6.0, timeout: 12.0 }
+
+  # ----- Done -------------------------------------------------------------
+  - { type: wait, duration: 2.0 }

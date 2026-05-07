@@ -70,3 +70,15 @@ safety_monitor:
     forward_arc_deg: 60.0
     hold_s: 0.5
     publish_rate_hz: 20.0
+
+pattern_tour:
+  ros__parameters:
+    pattern_file: ""               # blank = use packaged config/pattern.yaml
+    linear_speed: 0.15             # m/s, keep low for safety
+    angular_speed: 0.4             # rad/s
+    distance_tolerance_m: 0.05
+    angle_tolerance_rad: 0.05
+    cmd_vel_topic: "/cmd_vel"
+    odom_topic: "/odom"
+    landmark_topic: "/landmarks/detected"
+    start_delay_s: 3.0             # quiet pause before motion starts
