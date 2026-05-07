@@ -33,6 +33,7 @@ setup(
             'safety_monitor       = robot_tour_guide.safety_monitor:main',
             'landmark_announcer   = robot_tour_guide.landmark_announcer:main',
             'pattern_tour         = robot_tour_guide.pattern_tour:main',
+            'measure_pattern      = robot_tour_guide.measure_pattern:main',
         ],
     },
 )
