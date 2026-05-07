@@ -1,35 +1,32 @@
-# Predefined open-loop tour pattern for `pattern_tour`. Edit the steps
-# to match your real REPF B4 layout — distances are metres, angles are
-# radians (positive = CCW / left turn, negative = CW / right turn).
+# Predefined open-loop tour pattern for `pattern_tour`.
+# Distances are metres, angles are radians (positive = CCW / left turn).
+# Generated from measure_pattern recording in REPF B4.
 #
 # Step types:
 #   forward    distance: <metres>
-#   backward   distance: <metres>
+#   backward   distance: <metres>      (no LiDAR avoidance — path must be clear)
 #   rotate     angle:    <radians>
 #   announce   landmark_id: <int>  dwell: <s>  timeout: <s>
 #   wait       duration: <s>
-#
-# Tip: at the start, position the robot facing landmark 1. The robot will
-# announce + dwell, then turn / drive to the next stop.
 
 steps:
-  # ----- Stop 1: Gallogly Hall -------------------------------------------
+  # ----- Stop 1: Gallogly Hall ---------------------------------------------
+  - { type: forward,  distance: 0.299 }
   - { type: announce, landmark_id: 1, dwell: 6.0, timeout: 12.0 }
 
-  # ----- Stop 2: Sarkeys Energy Center -----------------------------------
-  - { type: rotate,   angle: -1.5708 }              # turn right 90 deg
-  - { type: forward,  distance: 1.0 }
+  # ----- Stop 2: Sarkeys Energy Center -------------------------------------
+  - { type: rotate,   angle: 0.1480 }
   - { type: announce, landmark_id: 2, dwell: 6.0, timeout: 12.0 }
 
-  # ----- Stop 3: Devon Energy Hall ---------------------------------------
-  - { type: rotate,   angle: 3.1416 }               # about-face 180 deg
-  - { type: forward,  distance: 1.5 }
+  # ----- Stop 3: Devon Energy Hall -----------------------------------------
+  - { type: rotate,   angle: 2.9982 }
+  - { type: backward, distance: 0.745 }
   - { type: announce, landmark_id: 3, dwell: 6.0, timeout: 12.0 }
 
-  # ----- Stop 4: Rawl Engineering Practice Facility ----------------------
-  - { type: rotate,   angle: -1.5708 }              # turn right 90 deg
-  - { type: forward,  distance: 1.5 }
+  # ----- Stop 4: Rawl Engineering Practice Facility ------------------------
+  - { type: rotate,   angle: -1.7316 }
+  - { type: forward,  distance: 1.142 }
   - { type: announce, landmark_id: 4, dwell: 6.0, timeout: 12.0 }
 
-  # ----- Done -------------------------------------------------------------
+  # ----- Done --------------------------------------------------------------
   - { type: wait, duration: 2.0 }
