@@ -239,6 +239,16 @@ class Executive(Node):
         result = future.result()
         if result is None:
             return
+        if self.state != State.NAVIGATING:
+            # We already moved on (e.g. landmark-confirmed early arrival
+            # cancelled this goal ourselves). The cancellation result is
+            # stale -- treating it as a failure would trigger spurious
+            # recoveries.
+            self.get_logger().info(
+                f'Ignoring stale Nav2 result '
+                f'(state={self.state.value}, status={result.status}).'
+            )
+            return
         status = result.status
         if status == GoalStatus.STATUS_SUCCEEDED:
             self._transition(State.AT_POI)
