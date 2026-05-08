@@ -13,7 +13,6 @@ setup(
         ('share/' + PACKAGE_NAME, ['package.xml']),
         ('share/' + PACKAGE_NAME + '/launch', glob('launch/*.launch.py')),
         ('share/' + PACKAGE_NAME + '/config', glob('config/*.yaml')),
-        ('share/' + PACKAGE_NAME + '/maps', glob('maps/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -31,9 +30,6 @@ setup(
             'executive            = robot_tour_guide.executive:main',
             'narrator             = robot_tour_guide.narrator:main',
             'safety_monitor       = robot_tour_guide.safety_monitor:main',
-            'landmark_announcer   = robot_tour_guide.landmark_announcer:main',
-            'pattern_tour         = robot_tour_guide.pattern_tour:main',
-            'measure_pattern      = robot_tour_guide.measure_pattern:main',
         ],
     },
 )

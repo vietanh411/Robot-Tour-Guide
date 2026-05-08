@@ -1,15 +1,15 @@
 # Robot Tour Guide
 
-A hybrid-architecture tour-guide stack for the **OU TurtleBot 4**, written for
-ROS 2 (Jazzy) + Gazebo Harmonic. The deliberative layer plans an optimal
-visiting order over a set of points-of-interest, and the executive layer
-classifies Nav2 failures (person blocking, furniture moved, door closed,
-unreachable POI) and chooses an appropriate recovery — instead of blindly
-retrying.
+A hybrid-architecture tour-guide stack for the **OU TurtleBot 4** (ROS 2
+Jazzy). The robot drives a planned route through four landmarks in a mapped
+indoor space, prints/speaks each landmark's description, then returns to the
+starting point. Nav2 handles obstacle and human avoidance during motion;
+when navigation fails the executive classifies the cause (person blocking,
+furniture moved, door closed, POI unreachable) and replans accordingly.
 
-A printable **ArUco** marker is taped near each tour stop. When the robot's
-OAK-D camera sees one, the matching description (from `landmarks.yaml`) is
-printed in the terminal and spoken via TTS.
+A printed **ArUco** marker is taped near each tour stop. When the OAK-D
+camera sees one, the matching description from `landmarks.yaml` is published
+on `/tour/narration` and either printed in green text or spoken via TTS.
 
 ---
 
@@ -17,31 +17,34 @@ printed in the terminal and spoken via TTS.
 
 ```
 Robot-Tour-Guide/
+├── README.md
+├── WRITTEN_REPORT.md
+├── Robot_Tour_Guide_Poster.pptx
+├── LICENSE
 └── ros2_ws/
     └── src/
         └── robot_tour_guide/
             ├── package.xml
             ├── setup.py
-            ├── robot_tour_guide/         # node implementations
+            ├── setup.cfg
+            ├── resource/robot_tour_guide
+            ├── robot_tour_guide/
             │   ├── aruco_detector.py
             │   ├── semantic_perception.py
             │   ├── world_model.py
             │   ├── tour_planner.py
             │   ├── executive.py
             │   ├── narrator.py
-            │   ├── landmark_announcer.py
             │   └── safety_monitor.py
             ├── launch/
-            │   ├── tour_guide.launch.py        # full stack
-            │   ├── tour_guide_sim.launch.py    # full stack, sim wrapper
-            │   └── perception_only.launch.py   # ArUco-only demo path
+            │   └── tour_guide.launch.py
             └── config/
-                ├── landmarks.yaml              # marker id -> description
-                ├── pois.yaml                   # tour stops with poses
-                └── params.yaml                 # all node parameters
+                ├── landmarks.yaml
+                ├── pois.yaml
+                └── params.yaml
 ```
 
-## Architecture (one-screen view)
+## Architecture
 
 ```
 Deliberative      tour_planner   ──────────► /tour/current_plan
@@ -58,236 +61,210 @@ Perception     aruco_detector ◄── camera           semantic_perception
                                                    /scan + camera
 ```
 
-Topic / data summary:
+| Topic                     | Type                       | Producer            | Consumer              |
+|---------------------------|----------------------------|---------------------|-----------------------|
+| `/landmarks/detected`     | `std_msgs/String` (JSON)   | `aruco_detector`    | `world_model`, `executive` |
+| `/landmarks/annotated`    | `sensor_msgs/Image`        | `aruco_detector`    | RViz preview          |
+| `/world/objects`          | `std_msgs/String` (JSON)   | `semantic_perception` | `world_model`       |
+| `/world/state`            | `std_msgs/String` (JSON)   | `world_model`       | `executive`           |
+| `/world/markers`          | `visualization_msgs/MarkerArray` | `world_model` | RViz                  |
+| `/tour/current_plan`      | `std_msgs/String` (JSON)   | `tour_planner`      | `executive`           |
+| `/tour/replan_request`    | `std_msgs/String` (JSON)   | `executive`         | `tour_planner`        |
+| `/tour/drop_poi`          | `std_msgs/String` (int)    | `executive`         | `tour_planner`        |
+| `/tour/narration`         | `std_msgs/String`          | `executive`         | `narrator`            |
+| `/tour/status`            | `std_msgs/String` (JSON)   | `executive`         | external monitors     |
+| `navigate_to_pose`        | Nav2 action                | `executive`         | Nav2                  |
 
-| Topic                     | Type            | Producer                | Consumer            |
-|---------------------------|-----------------|-------------------------|---------------------|
-| `/landmarks/detected`     | `std_msgs/String` (JSON) | `aruco_detector`     | `world_model`, `executive`, `landmark_announcer` |
-| `/landmarks/annotated`    | `sensor_msgs/Image`      | `aruco_detector`     | RViz preview        |
-| `/world/objects`          | `std_msgs/String` (JSON) | `semantic_perception`| `world_model`       |
-| `/world/state`            | `std_msgs/String` (JSON) | `world_model`        | `executive`         |
-| `/world/markers`          | `MarkerArray`            | `world_model`        | RViz                |
-| `/tour/current_plan`      | `std_msgs/String` (JSON) | `tour_planner`       | `executive`         |
-| `/tour/replan_request`    | `std_msgs/String` (JSON) | `executive`          | `tour_planner`      |
-| `/tour/drop_poi`          | `std_msgs/String` (int)  | `executive`          | `tour_planner`      |
-| `/tour/narration`         | `std_msgs/String`        | `executive`, `landmark_announcer` | `narrator` |
-| `/tour/status`            | `std_msgs/String` (JSON) | `executive`          | external monitors   |
-| `navigate_to_pose`        | Nav2 action              | `executive`          | Nav2                |
+> JSON-in-`std_msgs/String` is used to avoid the build-system overhead of a
+> separate `robot_tour_guide_msgs` package.
 
-> JSON-in-`std_msgs/String` is used to avoid the build-system complexity of a
-> separate `robot_tour_guide_msgs` package. Schemas are documented inline in
-> each node.
+## Executive states
 
-## Failure classifier (the deliberative core)
+| State            | Meaning                                                       |
+|------------------|---------------------------------------------------------------|
+| `IDLE`           | Waiting for a plan.                                           |
+| `NAVIGATING`     | Nav2 goal active for the current POI.                         |
+| `AT_POI`         | Reached by Nav2 success or matching ArUco landmark in range.  |
+| `NARRATING`      | Speaking/printing the landmark description.                   |
+| `RECOVERING`     | Handling a classified Nav2 failure.                           |
+| `RETURNING_HOME` | Driving back to the recorded start pose.                      |
+| `DONE`           | Tour finished.                                                |
 
-When Nav2 reports failure, `executive.classify_failure()` inspects the latest
-world snapshot and selects a recovery:
+The first AMCL pose received is captured as the **home pose**. After the
+last POI's description finishes (or after the plan is exhausted by drops),
+the executive announces *"Tour complete. Returning to the starting point."*,
+sends a Nav2 goal back to that pose, and concludes with *"I have returned
+to the starting point. Thank you for visiting!"*
 
-| Detected condition                                         | Class                | Recovery                                  |
-|------------------------------------------------------------|----------------------|-------------------------------------------|
-| Person within `person_blocking_distance_m`                 | `PERSON_BLOCKING`    | Say "excuse me", wait `person_block_wait_s`, retry |
-| New furniture-class cluster appeared in last 8 s           | `FURNITURE_MOVED`    | Request replan from current pose          |
-| No `door_open` cluster in forward arc, retries exhausted   | `DOOR_CLOSED`        | Drop POI, replan, narrate the skip        |
-| Retries exhausted with no other signal                     | `POI_UNREACHABLE`    | Drop POI, narrate, continue tour          |
-| Anything else                                              | `UNKNOWN`            | Short pause and retry once                |
+## Failure classifier
+
+When Nav2 reports failure, `executive.classify_failure()` inspects the
+latest world snapshot and picks a recovery:
+
+| Detected condition                                         | Class                | Recovery                                             |
+|------------------------------------------------------------|----------------------|------------------------------------------------------|
+| Person within `person_blocking_distance_m`                 | `PERSON_BLOCKING`    | Say "excuse me", wait `person_block_wait_s`, retry  |
+| New furniture-class cluster appeared in last 8 s           | `FURNITURE_MOVED`    | Request replan from current pose                     |
+| No `door_open` cluster forward, retries exhausted          | `DOOR_CLOSED`        | Drop POI, replan, narrate the skip                  |
+| Retries exhausted with no other signal                     | `POI_UNREACHABLE`    | Drop POI, narrate, continue tour                     |
+| Anything else                                              | `UNKNOWN`            | Short pause and retry                                |
 
 ---
 
 ## Build
 
-The robot ships with ROS 2 Jazzy, OpenCV ≥ 4.7 (which has the new
-`cv2.aruco.ArucoDetector`), and Nav2 already installed. On the desktop:
+The OU TurtleBot 4 desktops ship with ROS 2 Jazzy, OpenCV ≥ 4.7 (with the
+new `cv2.aruco` API), and Nav2 / `turtlebot4_navigation` already installed.
 
 ```bash
-# 1. Get the code
-cd ~
-git clone https://github.com/<your-org>/Robot-Tour-Guide.git
-cd Robot-Tour-Guide/ros2_ws
-
-# 2. (Optional) install YOLO + TTS for the perception layer + narrator
-pip install --user ultralytics pyttsx3
-
-# 3. Build
+cd ~/Robot-Tour-Guide/ros2_ws
 source /opt/ros/jazzy/setup.bash
 rosdep install --from-paths src --ignore-src -r -y
 colcon build --symlink-install
 source install/setup.bash
 ```
 
-The first time `semantic_perception` runs it will auto-download
-`yolov8n.pt` (~6 MB) into the working directory. If you have no GPU, `yolov8n`
-runs at ~5 Hz on a modern laptop CPU.
+Optional Python deps (only needed for richer perception and TTS):
 
----
+```bash
+pip install --user ultralytics pyttsx3
+```
+
+If `ultralytics` is missing, `semantic_perception` runs in LiDAR-only mode
+and the rest of the stack still works.
 
 ## Print the markers (one-time)
 
-Generate a 4×4 ArUco marker for each landmark id in `landmarks.yaml`:
+Generate one ArUco marker per landmark id in
+[`config/landmarks.yaml`](ros2_ws/src/robot_tour_guide/config/landmarks.yaml):
 
 1. Visit <https://chev.me/arucogen/>.
-2. Set **Dictionary = 4x4 (50, 100, 250, 1000)**.
-3. Enter the marker ID and a side length matching `aruco_detector.marker_size_m`
-   (default **0.10 m**, i.e. 10 cm). Use a ruler to confirm the printed size.
-4. Print, cut, and tape one marker at roughly camera height (~25–35 cm) on a flat vertical surface each tour stop.
-
-> A wrong `marker_size_m` will not break detection but will give you wrong
-> distances, which the arrival logic depends on.
+2. **Dictionary = 4x4 (50, 100, 250, 1000)**.
+3. Side length = `aruco_detector.marker_size_m` from
+   [`config/params.yaml`](ros2_ws/src/robot_tour_guide/config/params.yaml)
+   (default **0.10 m**). Confirm with a ruler — a wrong size will not break
+   detection but will give wrong distance measurements, and the
+   landmark-arrival logic relies on distance.
+4. Print, cut, tape one near each tour stop at roughly camera height
+   (~25–35 cm) on a flat vertical surface.
 
 ---
 
-## Demo procedure (REPF B4)
+## Demo procedure
 
-You have **two demo paths** — pick one based on time and risk tolerance.
+### Step 1 — Map the room (one-time per demo space)
 
-### Path A — Quickest: ArUco-only demo (5 min setup)
-
-Shows the symbol-to-description feature without Nav2 or planning. You drive,
-the robot recognises markers and announces them.
-
-**On the Pi (one SSH session per command):**
+On the Pi:
 
 ```bash
-ssh student@<robotName>.cs.nor.ou.edu
-ros2 launch turtlebot4_bringup robot.launch.py        # if not already up
-ros2 launch turtlebot4_bringup oakd.launch.py         # ensure camera is on
+ssh student@<robot>.cs.nor.ou.edu
+ros2 launch turtlebot4_bringup robot.launch.py
+ros2 service call /start_motor std_srvs/srv/Empty "{}"
+```
+
+On the desktop:
+
+```bash
+robot-setup.sh
+ros2 launch turtlebot4_navigation slam.launch.py
+ros2 launch turtlebot4_viz view_robot.launch.py
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p stamped:=true
+```
+
+Drive around until the map looks complete in RViz, then save it:
+
+```bash
+ros2 run nav2_map_server map_saver_cli -f ~/my_map
+# produces ~/my_map.pgm and ~/my_map.yaml
+```
+
+Update [`config/pois.yaml`](ros2_ws/src/robot_tour_guide/config/pois.yaml)
+with the `(x, y, yaw)` of each landmark in **your** map (read off RViz with
+"Publish Point", or eyeball from the saved map). Rebuild after editing
+configs:
+
+```bash
+cd ~/Robot-Tour-Guide/ros2_ws
+colcon build --symlink-install
+source install/setup.bash
+```
+
+### Step 2 — Run the demo (single launch file)
+
+**On the Pi (each command in its own SSH session):**
+
+```bash
+ros2 launch turtlebot4_bringup robot.launch.py
+ros2 launch turtlebot4_bringup oakd.launch.py
 ros2 service call /start_motor std_srvs/srv/Empty "{}"
 ```
 
 **On the desktop:**
 
 ```bash
-# 1. Connect to the robot
-robot-setup.sh        # follow prompts; enter the robot name
-
-# 2. Build + source (one-time per shell)
-cd ~/Robot-Tour-Guide/ros2_ws
-source /opt/ros/jazzy/setup.bash
-source install/setup.bash
-
-# 3. Launch perception-only stack
-ros2 launch robot_tour_guide perception_only.launch.py
-
-# 4. In a NEW terminal: drive the robot manually
-ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p stamped:=true
-
-# 5. (Optional) RViz so the audience sees what the robot sees
-ros2 launch turtlebot4_viz view_robot.launch.py
-# In RViz add an Image display and set Topic = /landmarks/annotated
-```
-
-Drive close to a marker (≤ 1.5 m), face it for ~1 s, and listen for the
-description. The cooldown is 12 s by default, so you won't get spammed if you
-linger. Switch to a different marker and the new description plays.
-
-### Path B — Full tour: planner + executive + Nav2 (15 min setup)
-
-Shows the complete deliberative + reactive system. Requires a map of REPF B4.
-
-**One-time prerequisite — make a map:**
-
-```bash
-# Pi
-ros2 service call /start_motor std_srvs/srv/Empty "{}"
-
-# Desktop
-ros2 launch turtlebot4_navigation slam.launch.py
-ros2 launch turtlebot4_viz view_robot.launch.py
-ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p stamped:=true
-# Drive around REPF B4 until the map looks complete in RViz.
-
-ros2 run nav2_map_server map_saver_cli -f ~/repf_b4_map
-```
-
-Then update `pois.yaml` with the actual `(x, y, yaw)` of each landmark in your
-saved map (use RViz "Publish Point" or read coordinates off the map).
-
-**Live demo, in five terminals:**
-
-```bash
-# Terminal 1 (Pi - SSH)
-ros2 launch turtlebot4_bringup robot.launch.py
-
-# Terminal 2 (Pi - SSH)
-ros2 launch turtlebot4_bringup oakd.launch.py
-ros2 service call /start_motor std_srvs/srv/Empty "{}"
-
-# Terminal 3 (Desktop)
-robot-setup.sh
-ros2 launch turtlebot4_navigation localization.launch.py \
-     map:=$HOME/repf_b4_map.yaml
-ros2 launch turtlebot4_navigation nav2.launch.py
-
-# Terminal 4 (Desktop)
-robot-setup.sh
-ros2 launch turtlebot4_viz view_robot.launch.py
-# In RViz: "2D Pose Estimate" to set initial pose.
-# Add MarkerArray on /world/markers and Image on /landmarks/annotated.
-
-# Terminal 5 (Desktop) - the tour itself
 robot-setup.sh
 cd ~/Robot-Tour-Guide/ros2_ws && source install/setup.bash
-ros2 launch robot_tour_guide tour_guide.launch.py
+
+# RViz so you can set the initial pose and watch the tour:
+ros2 launch turtlebot4_viz view_robot.launch.py &
+
+# The whole demo in one launch (Nav2 + AMCL + tour-guide stack):
+ros2 launch robot_tour_guide tour_guide.launch.py map:=$HOME/my_map.yaml
 ```
 
-The robot will auto-plan a tour from its current pose, drive to each POI,
-narrate when it sees the marker, and skip stops it cannot reach.
+In RViz, click **2D Pose Estimate** and place the arrow on the robot's true
+pose. AMCL converges, the executive captures that pose as the home point,
+and the tour begins:
 
-### Optional: enable the safety monitor on the Pi
+1. `tour_planner` orders the four POIs (nearest-neighbor + 2-opt).
+2. `executive` sends the first Nav2 goal.
+3. At each stop the matching ArUco marker is detected and the description
+   in `landmarks.yaml` is announced.
+4. If a person stands in the path, Nav2 will try to avoid them; if it
+   fails, the executive says *"Excuse me, may I please come through?"*,
+   waits, then retries.
+5. If a chair is moved into the path, the executive requests a replan.
+6. If a stop is unreachable after retries, it is skipped.
+7. After the last stop, the robot announces *"Tour complete. Returning to
+   the starting point."* and drives back to where you placed the initial
+   pose, then concludes with *"I have returned to the starting point.
+   Thank you for visiting!"*
 
-Run on the Pi (not the desktop) to keep the e-stop reflex tight:
+### Launch arguments
 
-```bash
-ros2 launch robot_tour_guide tour_guide.launch.py enable_safety_monitor:=true
-```
-
-(Run only the safety_monitor node on the Pi; everything else stays on the
-desktop. The launch file will start *all* nodes — for a Pi-only safety
-monitor, run `ros2 run robot_tour_guide safety_monitor --ros-args
---params-file <path>` directly.)
+| Argument                | Default                | Meaning                                                              |
+|-------------------------|------------------------|----------------------------------------------------------------------|
+| `map`                   | *(required)*           | Absolute path to the saved map YAML used by AMCL.                    |
+| `params_file`           | packaged `params.yaml` | Override the parameter file used by every tour-guide node.           |
+| `bringup_nav2`          | `true`                 | Set to `false` if Nav2 + AMCL are already running elsewhere.         |
+| `enable_safety_monitor` | `true`                 | Set to `false` to disable the LiDAR forward-arc emergency stop.      |
 
 ---
 
-## Recommended demo script (~3 minutes)
+## Configuration files
 
-Memorise this sequence so you can talk while the robot drives:
+| File | Purpose |
+|---|---|
+| [`config/landmarks.yaml`](ros2_ws/src/robot_tour_guide/config/landmarks.yaml) | ArUco id → landmark name and narration text. |
+| [`config/pois.yaml`](ros2_ws/src/robot_tour_guide/config/pois.yaml) | Tour stops with `(x, y, yaw)` in the map frame, plus matching landmark id. |
+| [`config/params.yaml`](ros2_ws/src/robot_tour_guide/config/params.yaml) | Centralized ROS parameters for every node. |
 
-| t (s) | Action                                        | What you say                                                |
-|-------|-----------------------------------------------|-------------------------------------------------------------|
-| 0     | Show RViz with the planned tour overlaid      | "The planner solved a TSP over five POIs."                  |
-| 15    | Robot reaches first marker; description plays | "ArUco marker confirms arrival, narration is data-driven." |
-| 45    | Step in front of the robot                    | "Person detected — watch the executive say excuse me."     |
-| 60    | Step out, robot resumes                       | "It went back to the same POI rather than skipping."       |
-| 90    | Move a chair onto the next path while moving  | "FurnitureMoved class triggers a replan."                  |
-| 120   | Block the last POI completely with a board    | "Two retries fail; POI is dropped and tour finishes."      |
-| 180   | Robot says "Tour complete."                   | Wrap.                                                       |
-
----
+Edit these YAML files instead of code whenever possible. After changing
+them, rebuild the workspace (`colcon build --symlink-install`) so the
+installed `share/` copies update.
 
 ## Troubleshooting
 
-| Symptom                                            | Fix                                                                    |
-|----------------------------------------------------|------------------------------------------------------------------------|
-| `aruco_detector` logs "Camera intrinsics received" never appears | Confirm `oakd.launch.py` is running on the Pi.                  |
-| Markers detected but distance is wildly wrong      | `marker_size_m` ≠ printed marker side length.                          |
-| `executive` never leaves `IDLE`                    | `tour_planner` published an empty plan — check `pois.yaml` is loaded.  |
-| Nav2 keeps failing on the same POI                 | Set the POI's `(x, y)` more carefully or drop it from `pois.yaml`.     |
-| YOLO crashes on import                             | `pip install ultralytics` on the desktop, not the Pi.                  |
-| TTS silent                                         | `pip install pyttsx3`; on Linux also `sudo apt install espeak`.        |
-| `robot-setup.sh` doesn't expose topics             | `ros2 daemon stop && ros2 daemon start`, then re-run.                  |
-
----
-
-## Code adoption note (for the bonus)
-
-Three components in this stack are designed to be reused as-is by other
-teams without depending on the rest:
-
-* **`aruco_detector`** — drop-in OAK-D ArUco recogniser; publishes JSON.
-* **`landmark_announcer`** — symbol→description with debounce, no planner needed.
-* **`tour_planner`** — pure-Python TSP+2-opt over a YAML POI file.
-
-To consume them, pull just those files and the `landmarks.yaml` /
-`pois.yaml` schemas — no custom messages required.
+| Symptom                                           | Fix                                                                    |
+|---------------------------------------------------|------------------------------------------------------------------------|
+| `aruco_detector` never logs "Camera intrinsics received" | Confirm `oakd.launch.py` is running on the Pi.                  |
+| Markers detected but distance wildly wrong        | `marker_size_m` ≠ printed marker side length.                          |
+| `executive` never leaves `IDLE`                   | Tour planner published an empty plan — check `pois.yaml` is loaded.    |
+| Robot never returns home                          | AMCL pose was never received before the last POI; set initial pose in RViz earlier next time. |
+| Nav2 keeps failing on the same POI                | Re-check the POI's `(x, y)` against your map, or drop it from `pois.yaml`. |
+| YOLO crashes on import                            | `pip install ultralytics` on the desktop, not the Pi.                  |
+| TTS silent                                        | `pip install pyttsx3`; on Linux also `sudo apt install espeak`.        |
+| `robot-setup.sh` doesn't expose topics            | `ros2 daemon stop && ros2 daemon start`, then re-run.                  |
 
 ---
 

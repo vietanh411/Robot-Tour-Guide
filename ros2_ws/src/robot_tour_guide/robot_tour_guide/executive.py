@@ -2,12 +2,13 @@
 
 States
 ------
-  IDLE        -> waiting for a plan
-  NAVIGATING  -> Nav2 goal active to next POI
-  AT_POI      -> arrived (Nav2 success OR matching ArUco landmark in range)
-  NARRATING   -> publishing description, dwelling for ``dwell_s``
-  RECOVERING  -> classified failure handling (wait, replan, drop POI)
-  DONE        -> all POIs visited or skipped
+  IDLE            -> waiting for a plan
+  NAVIGATING      -> Nav2 goal active to next POI
+  AT_POI          -> arrived (Nav2 success OR matching ArUco landmark in range)
+  NARRATING       -> publishing description, dwelling for ``dwell_s``
+  RECOVERING      -> classified failure handling (wait, replan, drop POI)
+  RETURNING_HOME  -> driving back to the recorded start pose
+  DONE            -> tour finished
 
 The deliberative novelty is :py:meth:`classify_failure`, which inspects the
 world-model snapshot at the moment Nav2 reports failure and chooses an
@@ -19,7 +20,7 @@ import math
 import os
 import time
 from enum import Enum
-from typing import Optional
+from typing import Optional, Tuple
 
 import rclpy
 import yaml
@@ -38,6 +39,7 @@ class State(Enum):
     AT_POI = 'AT_POI'
     NARRATING = 'NARRATING'
     RECOVERING = 'RECOVERING'
+    RETURNING_HOME = 'RETURNING_HOME'
     DONE = 'DONE'
 
 
@@ -71,6 +73,8 @@ class Executive(Node):
         self.plan: list = []
         self.current_idx: int = 0
         self.current_pose = (0.0, 0.0)
+        # First AMCL pose received; the robot drives back here at end of tour.
+        self.home_pose: Optional[Tuple[float, float, float]] = None
         self.world: dict = {'objects': [], 'landmarks': [], 'counts': {}}
         self.recent_landmarks: dict = {}
         self.retries_left = int(self.get_parameter('max_retries_per_poi').value)
@@ -146,6 +150,16 @@ class Executive(Node):
     def on_pose(self, msg: PoseWithCovarianceStamped):
         p = msg.pose.pose.position
         self.current_pose = (p.x, p.y)
+        if self.home_pose is None:
+            q = msg.pose.pose.orientation
+            yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                             1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+            self.home_pose = (p.x, p.y, yaw)
+            self.get_logger().info(
+                f'Captured home pose: x={p.x:+.2f} y={p.y:+.2f} '
+                f'yaw={math.degrees(yaw):+.1f} deg. '
+                'Robot will return here when the tour ends.'
+            )
 
     # ----- main loop --------------------------------------------------------
     def tick(self):
@@ -185,8 +199,7 @@ class Executive(Node):
     # ----- transitions ------------------------------------------------------
     def _start_navigation(self):
         if self.current_idx >= len(self.plan):
-            self._transition(State.DONE)
-            self._narrate("Tour complete. Thank you for visiting!")
+            self._finish_tour()
             return
 
         if not self.nav_client.wait_for_server(timeout_sec=2.0):
@@ -195,19 +208,20 @@ class Executive(Node):
 
         poi = self.plan[self.current_idx]
         goal = NavigateToPose.Goal()
-        goal.pose = self._pose_for_poi(poi)
+        goal.pose = self._build_pose(
+            float(poi['x']), float(poi['y']), float(poi.get('yaw', 0.0)),
+        )
         future = self.nav_client.send_goal_async(goal)
         future.add_done_callback(self._on_goal_response)
         self._transition(State.NAVIGATING)
         self.get_logger().info(f"Navigating to POI '{poi['name']}' (id={poi['id']}).")
 
-    def _pose_for_poi(self, poi: dict) -> PoseStamped:
+    def _build_pose(self, x: float, y: float, yaw: float) -> PoseStamped:
         ps = PoseStamped()
         ps.header.frame_id = self.get_parameter('frame_id').value
         ps.header.stamp = self.get_clock().now().to_msg()
-        ps.pose.position.x = float(poi['x'])
-        ps.pose.position.y = float(poi['y'])
-        yaw = float(poi.get('yaw', 0.0))
+        ps.pose.position.x = float(x)
+        ps.pose.position.y = float(y)
         ps.pose.orientation.z = math.sin(yaw / 2.0)
         ps.pose.orientation.w = math.cos(yaw / 2.0)
         return ps
@@ -269,10 +283,60 @@ class Executive(Node):
         self.current_idx += 1
         self.retries_left = int(self.get_parameter('max_retries_per_poi').value)
         if self.current_idx >= len(self.plan):
-            self._transition(State.DONE)
-            self._narrate("Tour complete. Thank you for visiting!")
+            self._finish_tour()
             return
         self._start_navigation()
+
+    # ----- end-of-tour return-to-start --------------------------------------
+    def _finish_tour(self):
+        """Drive back to the recorded home pose, then transition to DONE."""
+        self._narrate("Tour complete. Returning to the starting point.")
+        if self.home_pose is None:
+            self.get_logger().warn(
+                'No home pose was ever captured (AMCL silent?); '
+                'finishing in place.')
+            self._transition(State.DONE)
+            return
+        if not self.nav_client.wait_for_server(timeout_sec=2.0):
+            self.get_logger().warn(
+                'Nav2 unavailable for return-home; finishing in place.')
+            self._transition(State.DONE)
+            return
+        hx, hy, hyaw = self.home_pose
+        goal = NavigateToPose.Goal()
+        goal.pose = self._build_pose(hx, hy, hyaw)
+        future = self.nav_client.send_goal_async(goal)
+        future.add_done_callback(self._on_home_goal_response)
+        self._transition(State.RETURNING_HOME)
+        self.get_logger().info(
+            f'Returning home to ({hx:+.2f}, {hy:+.2f}, '
+            f'{math.degrees(hyaw):+.1f} deg).'
+        )
+
+    def _on_home_goal_response(self, future):
+        handle = future.result()
+        if handle is None or not handle.accepted:
+            self.get_logger().warn('Nav2 rejected return-home goal; finishing.')
+            self._narrate("Thank you for visiting!")
+            self._transition(State.DONE)
+            return
+        self._goal_handle = handle
+        handle.get_result_async().add_done_callback(self._on_home_goal_result)
+
+    def _on_home_goal_result(self, future):
+        result = future.result()
+        if result is not None and result.status == GoalStatus.STATUS_SUCCEEDED:
+            self._narrate(
+                "I have returned to the starting point. Thank you for visiting!")
+        else:
+            status = result.status if result is not None else 'unknown'
+            self.get_logger().warn(
+                f'Return-home Nav2 ended with status={status}; '
+                f'finishing in place.')
+            self._narrate(
+                "I had trouble getting back to the start, but the tour is "
+                "complete. Thank you for visiting!")
+        self._transition(State.DONE)
 
     # ----- failure handling -------------------------------------------------
     def classify_failure(self) -> FailureClass:
@@ -338,12 +402,11 @@ class Executive(Node):
         self.retries_left = max(0, self.retries_left - 1)
 
     def _post_recovery_action(self):
-        cls = self.classify_failure()
-        if cls in (FailureClass.DOOR_CLOSED, FailureClass.POI_UNREACHABLE):
-            # POI dropped; re-evaluate plan.
-            self.current_idx = 0   # planner re-sorts from current pose
-            return
-        # Otherwise: try the same POI again.
+        # In every recovery case the right next move is to (re)dispatch
+        # navigation. If the POI was dropped, on_plan has already swapped the
+        # plan and reset current_idx; if a replan was requested, the planner's
+        # next publish does the same. Either way, _start_navigation will route
+        # to the correct next POI -- or call _finish_tour if none remain.
         self._start_navigation()
 
     def _request_replan(self, reason: str):
