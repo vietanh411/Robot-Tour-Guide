@@ -24,12 +24,9 @@ Usage::
 
     ros2 launch robot_tour_guide tour_guide.launch.py
 
-Required argument::
-
-    map:=/abs/path/to/your_map.yaml      # the map saved from your SLAM run
-
 Optional arguments::
 
+    map:=/abs/path/to/your_map.yaml      # default = packaged maps/repf_b4_map.yaml
     params_file:=/abs/path/to/params.yaml
     bringup_nav2:=false                  # skip if Nav2 already running elsewhere
     enable_safety_monitor:=false         # disable the LiDAR e-stop reflex
@@ -52,6 +49,7 @@ from launch_ros.actions import Node
 def generate_launch_description():
     pkg_share = get_package_share_directory('robot_tour_guide')
     default_params = os.path.join(pkg_share, 'config', 'params.yaml')
+    default_map = os.path.join(pkg_share, 'maps', 'repf_b4_map.yaml')
 
     # turtlebot4_navigation may be missing on a non-robot dev machine. Resolve
     # lazily so the launch description still imports; the conditional include
@@ -69,8 +67,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'map',
-            description='Absolute path to the map YAML used by AMCL '
-                        '(saved by `ros2 run nav2_map_server map_saver_cli`).',
+            default_value=default_map,
+            description='Absolute path to the map YAML used by AMCL.',
         ),
         DeclareLaunchArgument(
             'params_file',
