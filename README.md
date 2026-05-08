@@ -189,35 +189,79 @@ colcon build --symlink-install
 source install/setup.bash
 ```
 
-### Step 2 — Run the demo (single launch file)
+### Step 2 — Run the demo (Nav2 + localization separate)
 
-**On the Pi (each command in its own SSH session):**
+The TurtleBot 4 navigation stack is best brought up in its own terminals
+rather than included from our launch file — it keeps the lifecycle managers
+independent and makes it obvious which process logs belong to which layer.
+Every desktop terminal must run `robot-setup.sh` first.
+
+**Pi (3 SSH sessions, in order):**
 
 ```bash
+ssh student@<robot>.cs.nor.ou.edu              # password: student
+
+# Pi-T1
 ros2 launch turtlebot4_bringup robot.launch.py
+
+# Pi-T2
 ros2 launch turtlebot4_bringup oakd.launch.py
+
+# Pi-T3
 ros2 service call /start_motor std_srvs/srv/Empty "{}"
 ```
 
-**On the desktop:**
+**Desktop (4 terminals):**
 
 ```bash
+# Desk-T1 — Localization (map_server + AMCL)
 robot-setup.sh
-cd ~/Robot-Tour-Guide/ros2_ws && source install/setup.bash
-
-# RViz so you can set the initial pose and watch the tour:
-ros2 launch turtlebot4_viz view_robot.launch.py &
-
-# The whole demo in one launch (Nav2 + AMCL + tour-guide stack):
-ros2 launch robot_tour_guide tour_guide.launch.py map:=$HOME/my_map.yaml
+ros2 launch turtlebot4_navigation localization.launch.py \
+     map:=$HOME/Robot-Tour-Guide/ros2_ws/src/robot_tour_guide/maps/repf_b4_map.yaml
+# WAIT for: "Managed nodes are active"
 ```
 
-In RViz, click **2D Pose Estimate** and place the arrow on the robot's true
-pose. AMCL converges, the executive captures that pose as the home point,
-and the tour begins:
+```bash
+# Desk-T2 — Nav2 (planner + controller + recoveries)
+robot-setup.sh
+ros2 launch turtlebot4_navigation nav2.launch.py
+# WAIT for: "Managed nodes are active"
+```
+
+```bash
+# Desk-T3 — RViz
+robot-setup.sh
+ros2 launch turtlebot4_viz view_robot.launch.py
+```
+
+In RViz **before launching the tour**:
+
+1. **Global Options → Fixed Frame = `map`**.
+2. The **Map** display should populate. If it's blank, set
+   **Topic = `/map`** and **Durability Policy = Transient Local**.
+3. Click **2D Pose Estimate** on the toolbar, then click+drag on the
+   robot's true location pointing the direction it's actually facing.
+4. The laser scan should snap onto the walls. If it doesn't, click
+   **2D Pose Estimate** again and try a slightly different position/heading.
+
+Sanity-check that the navigation action is alive:
+
+```bash
+ros2 action list | grep navigate
+# should print: /navigate_to_pose
+```
+
+```bash
+# Desk-T4 — The tour itself (skip Nav2 since we already brought it up)
+robot-setup.sh
+cd ~/Robot-Tour-Guide/ros2_ws && source install/setup.bash
+ros2 launch robot_tour_guide tour_guide.launch.py bringup_nav2:=false
+```
+
+The tour begins:
 
 1. `tour_planner` orders the four POIs (nearest-neighbor + 2-opt).
-2. `executive` sends the first Nav2 goal.
+2. `executive` sends the first Nav2 goal and captures the AMCL pose as **home**.
 3. At each stop the matching ArUco marker is detected and the description
    in `landmarks.yaml` is announced.
 4. If a person stands in the path, Nav2 will try to avoid them; if it
@@ -226,18 +270,40 @@ and the tour begins:
 5. If a chair is moved into the path, the executive requests a replan.
 6. If a stop is unreachable after retries, it is skipped.
 7. After the last stop, the robot announces *"Tour complete. Returning to
-   the starting point."* and drives back to where you placed the initial
-   pose, then concludes with *"I have returned to the starting point.
+   the starting point."*, drives back to where you placed the initial
+   pose, and concludes with *"I have returned to the starting point.
    Thank you for visiting!"*
 
-### Launch arguments
+### When done
 
-| Argument                | Default                | Meaning                                                              |
-|-------------------------|------------------------|----------------------------------------------------------------------|
-| `map`                   | *(required)*           | Absolute path to the saved map YAML used by AMCL.                    |
-| `params_file`           | packaged `params.yaml` | Override the parameter file used by every tour-guide node.           |
-| `bringup_nav2`          | `true`                 | Set to `false` if Nav2 + AMCL are already running elsewhere.         |
-| `enable_safety_monitor` | `true`                 | Set to `false` to disable the LiDAR forward-arc emergency stop.      |
+```bash
+# Pi-T3
+ros2 service call /stop_motor std_srvs/srv/Empty "{}"
+```
+
+Dock the robot. **Always stop the LiDAR motor before docking.**
+
+### Tuning robot speed during the demo
+
+The default Nav2 cruise speed (~0.5 m/s) is too quick for a tight indoor
+demo. Drop it at runtime — takes effect on the next goal, no rebuild:
+
+```bash
+ros2 param set /controller_server FollowPath.desired_linear_vel 0.15
+ros2 param set /velocity_smoother max_velocity "[0.15, 0.0, 1.0]"
+ros2 param set /controller_server FollowPath.rotate_to_heading_angular_vel 0.4
+```
+
+These reset whenever Nav2 restarts; re-apply after any restart of Desk-T2.
+
+### Launch arguments (`tour_guide.launch.py`)
+
+| Argument                | Default                       | Meaning                                                                  |
+|-------------------------|-------------------------------|--------------------------------------------------------------------------|
+| `map`                   | packaged `maps/repf_b4_map.yaml` | Absolute path to the map YAML used by AMCL when `bringup_nav2:=true`. |
+| `params_file`           | packaged `params.yaml`        | Override the parameter file used by every tour-guide node.               |
+| `bringup_nav2`          | `true`                        | Set to `false` when Nav2 + AMCL are launched in their own terminals.     |
+| `enable_safety_monitor` | `true`                        | Set to `false` to disable the LiDAR forward-arc emergency stop.          |
 
 ---
 
